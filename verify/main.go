@@ -11,6 +11,10 @@
 //	{"v":2,"seq":1,"prev":"<64 hex>","upto":10,"head":"<64 hex>",
 //	 "merkle_root":"<64 hex>","ts":"<RFC3339Nano>","sig":"<base64>"}
 //
+// merkle_root is a 64-hex root once the ledger has reached its first checkpoint
+// (upto >= 32). Before that there is no root to commit to, so the field is
+// present and explicitly empty — legal only while 0 < upto < 32.
+//
 //	hash(line)   = BLAKE3(canonical(line)), lowercase hex
 //	prev(line N) = hash(line N-1); the first line has prev = 64 zeros
 //	sig          = Ed25519 over the ASCII bytes of hash(line), standard base64
@@ -38,6 +42,12 @@ const (
 	hashHexLen      = 64
 	anchorsFileName = "anchors.jsonl"
 	pubFileName     = "pubkey.txt"
+	// checkpointEvery is the checkpoint interval of Cadeia v2: a merkle root is
+	// signed every 32 entries. The value is duplicated on purpose — the cartório
+	// shares no code with the emitter, so an independent reader has to state the
+	// same rule in its own words. Below the first checkpoint there is no root to
+	// commit to, so an empty merkle_root is legal only inside that window.
+	checkpointEvery = 32
 )
 
 // zeroHash is the prev expected on the first anchor line.
@@ -93,6 +103,18 @@ func isHex64(s string) bool {
 		}
 	}
 	return true
+}
+
+// merkleRootOK reports whether the root is acceptable for an anchor covering
+// upto entries. Before the first checkpoint there is no root to commit to, so an
+// empty value is honest — but only inside that window, so a corrupted or missing
+// root on a checkpointed ledger is still a failure. Accepting empty anywhere
+// would let a wiped root pass as a young ledger.
+func merkleRootOK(upto int, root string) bool {
+	if root == "" {
+		return upto > 0 && upto < checkpointEvery
+	}
+	return isHex64(root)
 }
 
 // b64decode accepts padded or raw standard base64, like the emitter does.
@@ -183,8 +205,8 @@ func verifyAnchors(lines []anchorLine, pub ed25519.PublicKey) report {
 		if !isHex64(a.Head) {
 			bad("head não é hex de %d caracteres", hashHexLen)
 		}
-		if !isHex64(a.MerkleRoot) {
-			bad("merkle_root não é hex de %d caracteres", hashHexLen)
+		if !merkleRootOK(a.Upto, a.MerkleRoot) {
+			bad("merkle_root inválido para upto=%d (vazio só é aceito em 0 < upto < %d, e hex de %d caso contrário)", a.Upto, checkpointEvery, hashHexLen)
 		}
 		if a.Upto <= 0 {
 			bad("upto=%d inválido", a.Upto)

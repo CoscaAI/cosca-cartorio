@@ -34,6 +34,27 @@ func newLine(t *testing.T, priv ed25519.PrivateKey, seq int, prev string) anchor
 	return a
 }
 
+// newLineAt builds a canonical, signed line with an explicit upto and root, so a
+// test can name the pre-checkpoint window exactly instead of deriving it.
+func newLineAt(t *testing.T, priv ed25519.PrivateKey, seq int, prev string, upto int, root string) anchorLine {
+	t.Helper()
+	a := anchorLine{
+		V:          ledgerVersion,
+		Seq:        seq,
+		Prev:       prev,
+		Upto:       upto,
+		Head:       strings.Repeat(fmt.Sprintf("%02x", seq), 32),
+		MerkleRoot: root,
+		TS:         "2026-11-12T00:00:00Z",
+	}
+	h, err := a.anchorHash()
+	if err != nil {
+		t.Fatalf("anchorHash: %v", err)
+	}
+	a.Sig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(h)))
+	return a
+}
+
 func hashOf(t *testing.T, a anchorLine) string {
 	t.Helper()
 	h, err := a.anchorHash()
@@ -140,6 +161,18 @@ func TestRun(t *testing.T) {
 	// Signature made by a different identity.
 	foreign := newLine(t, foreignPriv, 1, zeroHash)
 
+	// (g) the pre-checkpoint window: before the first checkpoint there is no
+	// merkle root to commit to, so an explicit empty root is honest — but only
+	// while 0 < upto < 32. Everything outside that window still demands 64 hex.
+	genesisEmpty := newLineAt(t, priv, 1, zeroHash, 1, "")
+	genesisUnsigned := genesisEmpty
+	genesisUnsigned.Sig = ""
+	emptyAt32 := newLineAt(t, priv, 1, zeroHash, 32, "")
+	emptyAt0 := newLineAt(t, priv, 1, zeroHash, 0, "")
+	emptyAt33 := newLineAt(t, priv, 1, zeroHash, 33, "")
+	rootAt40 := newLineAt(t, priv, 1, zeroHash, 40, strings.Repeat("a", 64))
+	root63At40 := newLineAt(t, priv, 1, zeroHash, 40, strings.Repeat("a", 63))
+
 	good := encode(t, line1)
 	dupKey := []byte(strings.Replace(string(good), `{"v":2,`, `{"v":3,"v":2,`, 1))
 	unknownField := []byte(strings.Replace(string(good), `{"v":2,`, `{"v":2,"x":1,`, 1))
@@ -172,6 +205,23 @@ func TestRun(t *testing.T) {
 		{name: "assinatura com 1 byte trocado falha", content: encode(t, tamperedSig), wantExit: 1, wantStderr: "assinatura não confere"},
 		{name: "assinatura de outra chave falha", content: encode(t, foreign), wantExit: 1, wantStderr: "assinatura não confere"},
 		{name: "head que não é hex de 64 falha", content: encode(t, badHead), wantExit: 1, wantStderr: "head não é hex de 64"},
+		{
+			name:       "âncora gênesis com merkle_root vazio passa",
+			content:    encode(t, genesisEmpty),
+			wantExit:   0,
+			wantStdout: fmt.Sprintf("anchors=1 head=%s upto=1 verdict=INTEGRO", genesisEmpty.Head),
+		},
+		{name: "gênesis sem assinatura falha", content: encode(t, genesisUnsigned), wantExit: 1, wantStderr: "sem assinatura"},
+		{name: "merkle_root vazio em upto=32 falha", content: encode(t, emptyAt32), wantExit: 1, wantStderr: "merkle_root inválido para upto=32"},
+		{name: "merkle_root vazio em upto=0 falha", content: encode(t, emptyAt0), wantExit: 1, wantStderr: "merkle_root inválido para upto=0"},
+		{name: "merkle_root vazio em upto=33 falha", content: encode(t, emptyAt33), wantExit: 1, wantStderr: "merkle_root inválido para upto=33"},
+		{
+			name:       "merkle_root de 64 hex em upto=40 passa",
+			content:    encode(t, rootAt40),
+			wantExit:   0,
+			wantStdout: fmt.Sprintf("anchors=1 head=%s upto=40 verdict=INTEGRO", rootAt40.Head),
+		},
+		{name: "merkle_root de 63 hex em upto=40 falha", content: encode(t, root63At40), wantExit: 1, wantStderr: "merkle_root inválido para upto=40"},
 		{name: "chave duplicada falha", content: dupKey, wantExit: 1, wantStderr: "forma canônica"},
 		{name: "campo desconhecido falha", content: unknownField, wantExit: 1, wantStderr: "campo desconhecido"},
 		{name: "JSON inválido falha", content: []byte("{nao-e-json}\n"), wantExit: 1, wantStderr: "JSON inválido"},
